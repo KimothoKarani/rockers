@@ -1,19 +1,24 @@
 use std::env;
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
-use std::sync::Arc;
 
-use anyhow::{Context, Ok};
+use anyhow::Context;
+use flate2::read::GzDecoder;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use reqwest::header::{self, HeaderMap};
 use reqwest::{Client, ClientBuilder, Response};
 use serde::Deserialize;
+use tar::Archive;
+use tempfile::{self, TempDir};
 use tokio::io::AsyncWriteExt;
 use tokio::task::JoinSet;
 
-const IMAGE: &str = "golang";
+const IMAGE: &str = "nginx";
 const REGISTRY_URL: &str = "https://registry-1.docker.io";
 const AUTH_URL: &str = "https://auth.docker.io";
 const SVC_URL: &str = "registry.docker.io";
+const TARGET: &str = "./tmp/rootfs";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -21,16 +26,41 @@ async fn main() -> anyhow::Result<()> {
     let desc = client.get_platform_manifest_descriptor().await?;
     let ImageManifest { config, layers } = client.get_image_manifest(&desc).await?;
 
+    let progress = MultiProgress::new();
+    let style = ProgressStyle::with_template(
+        "{msg:<2} [{bar:40.green/white}] {bytes:>8}/{total_bytes:8} ({bytes_per_sec}, {eta})",
+    )?
+    .progress_chars("=>-");
+
     client
-        .download_blob(&config, format!("./tmp/layers/config.json"))
+        .download_blob(&config, format!("./tmp/config.json"))
         .await?;
+
+    let tmp_dir = TempDir::with_prefix("layers-")?;
+    let mut paths = Vec::with_capacity(layers.len());
+    let mut bars = Vec::with_capacity(layers.len());
 
     let mut set = JoinSet::new();
     for (index, layer) in layers.into_iter().enumerate() {
+        // let path = format!("./tmp/layers/{}_{}.tar.gz", index, layer.digest);
+        let path = tmp_dir
+            .path()
+            .join(format!("{}_{}.tar.gz", index, layer.digest));
+        paths.push(path.clone());
+
+        let bar = progress.add(ProgressBar::new(layer.size));
+        bar.set_style(style.clone());
+        bars.push(bar.clone());
+
         let client = client.clone();
         set.spawn(async move {
-            let path = format!("./tmp/layers/{}_{}.tar.gz", index, layer.digest);
-            client.download_blob_with_progress(&layer, path).await
+            let digest_short = &layer.digest[7..7 + 12];
+            bar.set_message(format!("{digest_short}: Downloading"));
+            let res = client
+                .download_blob_with_progress(&layer, &path, bar.clone())
+                .await;
+            bar.finish_with_message(format!("{digest_short}: Download complete"));
+            res
         });
     }
 
@@ -38,6 +68,35 @@ async fn main() -> anyhow::Result<()> {
         res.unwrap()?;
     }
 
+    for (path, bar) in paths.into_iter().zip(bars) {
+        let digest_short = &path
+            .file_name()
+            .context("Path has no file name")?
+            .to_str()
+            .context("File name is not valid UTF-8")?
+            .split(':')
+            .last()
+            .context("File name contains no ':' separator")?[7..7 + 12];
+
+        let file = File::open(&path)?;
+
+        bar.reset();
+        bar.set_length(file.metadata()?.len());
+        bar.set_style(style.clone());
+        bar.set_message(format!("{digest_short}: Extracting"));
+
+        extract_tar_gz(bar.wrap_read(file), &TARGET)?;
+
+        bar.finish_with_message(format!("{digest_short}: Pull complete"));
+    }
+
+    Ok(())
+}
+
+fn extract_tar_gz(file: impl Read, target_path: impl AsRef<Path>) -> anyhow::Result<()> {
+    let decoder = GzDecoder::new(file);
+    let mut archive = Archive::new(decoder);
+    archive.unpack(target_path)?;
     Ok(())
 }
 
@@ -45,7 +104,6 @@ async fn main() -> anyhow::Result<()> {
 struct RegistryClient {
     client: reqwest::Client,
     image: String,
-    progress: Arc<MultiProgress>,
 }
 
 impl RegistryClient {
@@ -72,11 +130,7 @@ impl RegistryClient {
         );
         let client = ClientBuilder::new().default_headers(headers).build()?;
 
-        Ok(Self {
-            image,
-            client,
-            progress: Arc::new(MultiProgress::new()),
-        })
+        Ok(Self { image, client })
     }
 
     async fn get_manifests(&self, digest: &str) -> anyhow::Result<Response> {
@@ -161,23 +215,13 @@ impl RegistryClient {
         &self,
         layer: &Descriptor,
         path: impl AsRef<Path>,
+        bar: ProgressBar,
     ) -> anyhow::Result<()> {
-        let bar = self.progress.add(ProgressBar::new(layer.size));
-        bar.set_style(
-            ProgressStyle::with_template(
-            "{msg:<2} [{bar:40.green/white}] {bytes:>8}/{total_bytes:8} ({bytes_per_sec}, {eta})",
-        )?
-        .progress_chars("=>-")
-        );
-
         let image = &self.image;
         let digest = &layer.digest;
-        let digest_short = &digest[7..7 + 12];
 
         let url = format!("{REGISTRY_URL}/v2/library/{image}/blobs/{digest}");
         let mut resp = self.client.get(url).send().await?;
-
-        bar.set_message(digest_short.to_owned());
 
         let mut file = tokio::fs::File::create(&path).await?;
         while let Some(chunk) = resp.chunk().await? {
@@ -185,8 +229,6 @@ impl RegistryClient {
             bar.inc(chunk.len() as u64);
         }
         file.flush().await?;
-
-        bar.finish_with_message(format!("{digest_short}: Pull complete"));
 
         Ok(())
     }
