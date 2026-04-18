@@ -4,7 +4,7 @@ pub mod pull;
 pub mod run;
 
 #[derive(Debug, Parser)]
-#[command(name = "mini-docker", about = "Pull and run container images")]
+#[command(name = "rockers", about = "Pull and run container images")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -25,6 +25,7 @@ pub struct PullArgs {
 
 #[derive(Debug, Args, Clone)]
 pub struct RunArgs {
-    pub image: String,
-    pub command: String,
+    // pub image: String,
+    #[clap(required = true, trailing_var_arg = true)]
+    pub command: Vec<String>,
 }

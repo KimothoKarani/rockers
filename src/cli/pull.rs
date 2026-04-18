@@ -12,7 +12,7 @@ use tokio::task::JoinSet;
 use crate::cli::PullArgs;
 use crate::registry::{ImageManifest, RegistryClient};
 
-const TARGET: &str = "./tmp/rootfs";
+const TARGET: &str = "./tmp/rootfs-new3";
 
 impl PullArgs {
     pub async fn run(&self) -> anyhow::Result<()> {

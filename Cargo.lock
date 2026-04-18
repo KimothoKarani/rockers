@@ -842,21 +842,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
-name = "mini-docker"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "flate2",
- "indicatif",
- "reqwest",
- "serde",
- "tar",
- "tempfile",
- "tokio",
-]
-
-[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1140,6 +1125,21 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rockers"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "flate2",
+ "indicatif",
+ "reqwest",
+ "serde",
+ "tar",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
