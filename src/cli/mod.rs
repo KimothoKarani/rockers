@@ -21,6 +21,8 @@ pub enum Command {
 #[derive(Debug, Args, Clone)]
 pub struct PullArgs {
     pub image: String,
+    #[arg(long)]
+    pub target: Option<String>,
 }
 
 #[derive(Debug, Args, Clone)]

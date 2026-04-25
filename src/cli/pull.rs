@@ -1,4 +1,4 @@
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
 
@@ -12,19 +12,37 @@ use tokio::task::JoinSet;
 use crate::cli::PullArgs;
 use crate::registry::{ImageManifest, RegistryClient};
 
-const TARGET: &str = "./tmp/rootfs-new3";
+// const TARGET: &str = "./tmp/rootfs-new3";
 
 impl PullArgs {
     pub async fn run(&self) -> anyhow::Result<()> {
+        let target = match &self.target {
+            Some(path) => path.to_string(),
+            None => format!(
+                "./tmp/rootfs-{}",
+                self.image.split('/').last().unwrap_or(&self.image)
+            ),
+        };
+        let path = Path::new(&target);
+        if path.try_exists()? {
+            if self.target.is_none() {
+                anyhow::bail!("target directory already exists: {}", target);
+            } else {
+                fs::remove_dir_all(&target)?;
+            }
+        }
         let client = RegistryClient::new(&self.image).await?;
         let desc = client.get_platform_manifest_descriptor().await?;
-        let ImageManifest { config, layers } = client.get_image_manifest(&desc).await?;
+        let ImageManifest { config, layers } = client.get_image_manifest(&desc.digest).await?;
 
         let progress = MultiProgress::new();
         let style = ProgressStyle::with_template(
             "{msg:<2} [{bar:40.green/white}] {bytes:>8}/{total_bytes:8} ({bytes_per_sec}, {eta})",
         )?
         .progress_chars("=>-");
+
+        fs::create_dir_all("./tmp")?;
+        fs::create_dir_all(&target)?;
 
         client
             .download_blob(&config, format!("./tmp/config.json"))
@@ -79,7 +97,7 @@ impl PullArgs {
             bar.set_style(style.clone());
             bar.set_message(format!("{digest_short}: Extracting"));
 
-            extract_tar_gz(bar.wrap_read(file), TARGET)?;
+            extract_tar_gz(bar.wrap_read(file), &target)?;
 
             bar.finish_with_message(format!("{digest_short}: Pull complete"));
         }
@@ -91,6 +109,7 @@ impl PullArgs {
 pub fn extract_tar_gz(file: impl Read, target_path: impl AsRef<Path>) -> anyhow::Result<()> {
     let decoder = GzDecoder::new(file);
     let mut archive = Archive::new(decoder);
+    archive.set_overwrite(true);
     archive.unpack(target_path)?;
     Ok(())
 }
