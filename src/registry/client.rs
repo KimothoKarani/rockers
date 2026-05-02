@@ -1,12 +1,16 @@
-use std::env;
+use std::env::consts;
 use std::path::Path;
 
-use anyhow::Context;
+use anyhow::{Context, Ok};
 use indicatif::ProgressBar;
 use reqwest::header::{self, HeaderMap};
 use reqwest::{Client, ClientBuilder};
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt;
+
+use crate::image::{ImageName, Reference};
+use crate::registry::types::{Descriptor, ImageManifest, ManifestEnvelope, ManifestList};
+use crate::registry::{MANIFEST_LIST_V2, MANIFEST_V2, OCI_INDEX, OCI_MANIFEST};
 
 const AUTH_URL: &str = "https://auth.docker.io";
 const REGISTRY_URL: &str = "https://registry-1.docker.io";
@@ -15,16 +19,15 @@ const REGISTRY_URL: &str = "https://registry-1.docker.io";
 pub struct RegistryClient {
     client: reqwest::Client,
     repository: String,
-    tag: String,
+    reference: String,
 }
 
 impl RegistryClient {
-    pub async fn new(image: &str) -> anyhow::Result<Self> {
-        let (image, tag) = image.split_once(":").unwrap_or((image, "latest"));
-        let repository = if image.contains('/') {
-            image.to_owned()
-        } else {
-            format!("library/{image}")
+    pub async fn new(image: ImageName) -> anyhow::Result<Self> {
+        let repository = format!("{}/{}", image.repository, image.name);
+        let reference = match image.reference {
+            Reference::Tag(t) => t,
+            Reference::Digest(d) => d,
         };
 
         #[derive(Deserialize)]
@@ -33,7 +36,7 @@ impl RegistryClient {
         }
 
         let token = Client::new()
-            .get(format!("{AUTH_URL}/token",))
+            .get(format!("{AUTH_URL}/token"))
             .query(&[("service", "registry.docker.io")])
             .query(&[("scope", format!("repository:{repository}:pull"))])
             .send()
@@ -52,7 +55,7 @@ impl RegistryClient {
         Ok(Self {
             client,
             repository,
-            tag: tag.to_owned(),
+            reference,
         })
     }
 
@@ -75,50 +78,54 @@ impl RegistryClient {
         Ok(res)
     }
 
-    pub async fn get_manifest_list(&self) -> anyhow::Result<ManifestList> {
-        let accept = "application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.index.v1+json";
-
-        let res = self
-            .get_manifest_response(&self.tag, accept)
-            .await?
-            .json::<ManifestList>()
-            .await?;
-
-        Ok(res)
-    }
-
-    pub async fn get_platform_manifest_descriptor(&self) -> anyhow::Result<ManifestDescriptor> {
-        let os = env::consts::OS;
-        let arch = if env::consts::ARCH == "x86_64" {
+    pub async fn resolve_image_manifest(&self) -> anyhow::Result<ImageManifest> {
+        let os = consts::OS;
+        let arch = if consts::ARCH == "x86_64" {
             "amd64"
         } else {
-            env::consts::ARCH
+            consts::ARCH
         };
 
-        if let Ok(list) = self.get_manifest_list().await {
-            let desc = list
-                .manifests
-                .into_iter()
-                .find(|m| m.platform.architecture == arch && m.platform.os == os)
-                .with_context(|| {
-                    format!("No manifest found for the current platform (os: {os}, arch: {arch})")
-                })?;
+        // Step 1 - ONE request, accepting both shapes
+        let accept = format!("{MANIFEST_LIST_V2}, {OCI_INDEX},  {MANIFEST_V2}, {OCI_MANIFEST}");
+        let response = self.get_manifest_response(&self.reference, &accept).await?;
 
-            return Ok(desc);
+        // Step 2 - save Content-Type header before consuming the response body
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+
+        // Read raw bytes - we'll deserialize them ourselves instead of using .json()
+        let bytes = response.bytes().await?;
+
+        // Peak at the mediaType field in the JSON, fall back to Content-Type header
+        let envelope: ManifestEnvelope = serde_json::from_slice(&bytes)?;
+        let media_type = envelope.media_type.as_deref().unwrap_or(&content_type);
+
+        match media_type {
+            // Step 3 - Got a manifest list? Find our platform, make a second call
+            MANIFEST_LIST_V2 | OCI_INDEX => {
+                let list: ManifestList = serde_json::from_slice(&bytes)?;
+                let desc = list
+                    .manifests
+                    .into_iter()
+                    .find(|m| m.platform.architecture == arch && m.platform.os == os)
+                    .with_context(|| {
+                        format!(
+                            "No manifest found for the current platform (os: {os}, arch: {arch})"
+                        )
+                    })?;
+                self.get_image_manifest(&desc.digest).await
+            }
+            // Step 4 - Got an image manifest directly? Already done
+            _ => Ok(serde_json::from_slice(&bytes)?),
         }
-
-        let manifest = self.get_image_manifest(&self.tag).await?;
-        Ok(ManifestDescriptor {
-            digest: self.tag.clone(),
-            platform: Platform {
-                architecture: arch.to_owned(),
-                os: os.to_owned(),
-            },
-            size: manifest.config.size,
-        })
     }
 
-    pub async fn get_image_manifest(&self, reference: &str) -> anyhow::Result<ImageManifest> {
+    async fn get_image_manifest(&self, reference: &str) -> anyhow::Result<ImageManifest> {
         let accept = "application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json";
 
         let res = self
@@ -167,39 +174,4 @@ impl RegistryClient {
 
         Ok(())
     }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ManifestList {
-    pub manifests: Vec<ManifestDescriptor>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ManifestDescriptor {
-    pub digest: String,
-    pub platform: Platform,
-    pub size: u64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Platform {
-    pub architecture: String,
-    pub os: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ImageManifest {
-    pub config: Descriptor,
-    pub layers: Vec<Descriptor>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Descriptor {
-    pub digest: String,
-    pub size: u64,
 }

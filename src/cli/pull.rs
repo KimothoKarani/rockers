@@ -10,30 +10,16 @@ use tempfile::{self, TempDir};
 use tokio::task::JoinSet;
 
 use crate::cli::PullArgs;
+use crate::image::ImageName;
 use crate::registry::{ImageManifest, RegistryClient};
 
-// const TARGET: &str = "./tmp/rootfs-new3";
+const TARGET: &str = "./tmp/rootfs";
 
 impl PullArgs {
     pub async fn run(&self) -> anyhow::Result<()> {
-        let target = match &self.target {
-            Some(path) => path.to_string(),
-            None => format!(
-                "./tmp/rootfs-{}",
-                self.image.split('/').last().unwrap_or(&self.image)
-            ),
-        };
-        let path = Path::new(&target);
-        if path.try_exists()? {
-            if self.target.is_none() {
-                anyhow::bail!("target directory already exists: {}", target);
-            } else {
-                fs::remove_dir_all(&target)?;
-            }
-        }
-        let client = RegistryClient::new(&self.image).await?;
-        let desc = client.get_platform_manifest_descriptor().await?;
-        let ImageManifest { config, layers } = client.get_image_manifest(&desc.digest).await?;
+        let image = self.image.parse::<ImageName>()?;
+        let client = RegistryClient::new(image).await?;
+        let ImageManifest { config, layers } = client.resolve_image_manifest().await?;
 
         let progress = MultiProgress::new();
         let style = ProgressStyle::with_template(
@@ -42,7 +28,7 @@ impl PullArgs {
         .progress_chars("=>-");
 
         fs::create_dir_all("./tmp")?;
-        fs::create_dir_all(&target)?;
+        fs::create_dir_all(&TARGET)?;
 
         client
             .download_blob(&config, format!("./tmp/config.json"))
@@ -97,7 +83,7 @@ impl PullArgs {
             bar.set_style(style.clone());
             bar.set_message(format!("{digest_short}: Extracting"));
 
-            extract_tar_gz(bar.wrap_read(file), &target)?;
+            extract_tar_gz(bar.wrap_read(file), &TARGET)?;
 
             bar.finish_with_message(format!("{digest_short}: Pull complete"));
         }
