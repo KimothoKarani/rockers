@@ -29,6 +29,24 @@ pub struct Descriptor {
     pub data: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<Platform>,
+}
+
+/// Platform describes the minimum runtime requirements of
+/// platform-specific images.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Platform {
+    pub architecture: String,
+    pub os: String,
+    #[serde(rename = "os.version", skip_serializing_if = "Option::is_none")]
+    pub os_version: Option<String>,
+    #[serde(rename = "os.features", skip_serializing_if = "Option::is_none")]
+    pub os_features: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub features: Option<Vec<String>>,
 }
 
 /// Digest acts as a content identifier, enabling content addressability.
