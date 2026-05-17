@@ -33,6 +33,39 @@ pub struct Descriptor {
     pub platform: Option<Platform>,
 }
 
+const EMPTY_BLOB_DIGEST: &str =
+    "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a";
+
+impl Descriptor {
+    pub fn empty() -> Self {
+        let empty_blob_digest = Digest::try_from(EMPTY_BLOB_DIGEST.to_owned()).unwrap();
+
+        Self {
+            media_type: MediaType::Empty,
+            digest: empty_blob_digest,
+            size: 2,
+            urls: None,
+            annotations: None,
+            data: None,
+            artifact_type: None,
+            platform: None,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        let empty_blob_digest = Digest::try_from(EMPTY_BLOB_DIGEST.to_owned()).unwrap();
+
+        self.media_type == MediaType::Empty
+            && self.digest == empty_blob_digest
+            && self.size == 2
+            && matches!(self.data.as_deref(), None | Some("e30="))
+            && self.urls.is_none()
+            && self.annotations.is_none()
+            && self.artifact_type.is_none()
+            && self.platform.is_none()
+    }
+}
+
 /// Platform describes the minimum runtime requirements of
 /// platform-specific images.
 #[derive(Debug, Clone, Deserialize)]
@@ -51,7 +84,7 @@ pub struct Platform {
 
 /// Digest acts as a content identifier, enabling content addressability.
 /// It uniquely identifies content by taking a collision-resistant hash of the bytes
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(try_from = "String")]
 pub struct Digest {
     /// The cryptographic hash function used to compute the digest.
@@ -97,7 +130,7 @@ impl Display for Digest {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Algorithm {
     #[default]
     Sha256,
@@ -155,6 +188,31 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+
+    #[test]
+    fn descriptor_empty_returns_empty_blob_descriptor() {
+        let descriptor = Descriptor::empty();
+
+        assert_eq!(descriptor.media_type, MediaType::Empty);
+        assert_eq!(descriptor.digest.to_string(), EMPTY_BLOB_DIGEST);
+        assert_eq!(descriptor.size, 2);
+        assert!(descriptor.urls.is_none());
+        assert!(descriptor.annotations.is_none());
+        assert!(descriptor.data.is_none());
+        assert!(descriptor.artifact_type.is_none());
+        assert!(descriptor.platform.is_none());
+        assert!(descriptor.is_empty());
+    }
+
+    #[rstest]
+    #[case::without_data(None)]
+    #[case::with_empty_json_data(Some("e30=".to_owned()))]
+    fn descriptor_is_empty_accepts_empty_blob_data_variants(#[case] data: Option<String>) {
+        let mut descriptor = Descriptor::empty();
+        descriptor.data = data;
+
+        assert!(descriptor.is_empty());
+    }
 
     #[rstest]
     #[case::sha256("sha256", Algorithm::Sha256)]

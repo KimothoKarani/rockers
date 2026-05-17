@@ -50,6 +50,8 @@ pub enum MediaType {
     /// Empty for unused descriptors.
     Empty,
     /// Unknown media type.
+    // TODO: enforce RFC 6838, including the naming requirements in its section 4.2,
+    // and MAY be registered with IANA.
     Unknown(String),
 }
 
@@ -62,9 +64,7 @@ impl From<String> for MediaType {
             OCI_IMAGE_MANIFEST | DOCKER_DISTRIBUTION_MANIFEST => Self::ImageManifest,
             OCI_IMAGE_CONFIG | DOCKER_CONTAINER_IMAGE => Self::ImageConfig,
             OCI_IMAGE_LAYER_TAR => Self::ImageLayerTar,
-            OCI_IMAGE_LAYER_TAR_GZIP | DOCKER_IMAGE_ROOTFS_DIFF_TAR_GZIP => {
-                Self::ImageLayerTarGzip
-            }
+            OCI_IMAGE_LAYER_TAR_GZIP | DOCKER_IMAGE_ROOTFS_DIFF_TAR_GZIP => Self::ImageLayerTarGzip,
             OCI_IMAGE_LAYER_TAR_ZSTD => Self::ImageLayerTarZstd,
             OCI_EMPTY => Self::Empty,
             _ => Self::Unknown(media_type),
