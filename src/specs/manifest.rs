@@ -2,12 +2,12 @@
 
 use std::collections::HashMap;
 
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::specs::descriptor::Descriptor;
 use crate::specs::media_type::{MediaType, OCI_IMAGE_MANIFEST};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Manifest {
     #[serde(deserialize_with = "deserialize_schema_version")]
@@ -23,9 +23,10 @@ pub struct Manifest {
     pub config: Descriptor,
     #[serde(deserialize_with = "deserialize_layers")]
     pub layers: Vec<Descriptor>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject: Option<Descriptor>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    // TODO: validate annotation keys and values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotations: Option<HashMap<String, String>>,
 }
 
@@ -74,7 +75,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use rstest::{fixture, rstest};
+    use rstest::rstest;
     use serde_json::json;
 
     use super::*;
@@ -82,19 +83,18 @@ mod tests {
         DOCKER_DISTRIBUTION_MANIFEST, OCI_IMAGE_CONFIG, OCI_IMAGE_INDEX,
     };
 
-    #[fixture]
-    fn empty_descriptor() -> serde_json::Value {
-        json!({
-              "mediaType": "application/vnd.oci.empty.v1+json",
-              "digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-              "size": 2,
-              "data": "e30="
-        })
-    }
-
-    #[fixture]
-    fn default_layers(empty_descriptor: serde_json::Value) -> serde_json::Value {
-        json!([empty_descriptor])
+    impl Default for Manifest {
+        fn default() -> Self {
+            Self {
+                schema_version: 2,
+                media_type: None,
+                artifact_type: None,
+                config: Descriptor::empty(),
+                layers: vec![Descriptor::empty()],
+                subject: None,
+                annotations: None,
+            }
+        }
     }
 
     #[rstest]
@@ -104,16 +104,14 @@ mod tests {
         MediaType::DOCKER_DISTRIBUTION_MANIFEST
     )]
     fn deserialize_accepts_schema_version_2_with_image_manifest_media_type(
-        empty_descriptor: serde_json::Value,
-        default_layers: serde_json::Value,
         #[case] media_type: &str,
         #[case] expected: MediaType,
     ) {
         let json = json!({
             "schemaVersion": 2,
             "mediaType": media_type,
-            "config": empty_descriptor,
-            "layers": default_layers
+            "config": Descriptor::empty(),
+            "layers": vec![Descriptor::empty()]
         });
 
         let manifest = serde_json::from_value::<Manifest>(json).unwrap();
@@ -123,14 +121,11 @@ mod tests {
     }
 
     #[rstest]
-    fn deserialize_accepts_missing_media_type(
-        empty_descriptor: serde_json::Value,
-        default_layers: serde_json::Value,
-    ) {
+    fn deserialize_accepts_missing_media_type() {
         let json = json!({
             "schemaVersion": 2,
-            "config": empty_descriptor,
-            "layers": default_layers
+            "config": Descriptor::empty(),
+            "layers": vec![Descriptor::empty()]
         });
 
         let manifest = serde_json::from_value::<Manifest>(json).unwrap();
@@ -143,16 +138,12 @@ mod tests {
     #[case::zero(0)]
     #[case::one(1)]
     #[case::three(3)]
-    fn deserialize_rejects_schema_version_other_than_2(
-        empty_descriptor: serde_json::Value,
-        default_layers: serde_json::Value,
-        #[case] schema_version: u8,
-    ) {
+    fn deserialize_rejects_schema_version_other_than_2(#[case] schema_version: u8) {
         let json = json!({
             "schemaVersion": schema_version,
             "mediaType": OCI_IMAGE_MANIFEST,
-            "config": empty_descriptor,
-            "layers": default_layers
+            "config": Descriptor::empty(),
+            "layers": vec![Descriptor::empty()]
         });
 
         let err = serde_json::from_value::<Manifest>(json).unwrap_err();
@@ -164,16 +155,12 @@ mod tests {
     #[case::image_index(OCI_IMAGE_INDEX)]
     #[case::image_config(OCI_IMAGE_CONFIG)]
     #[case::unknown("application/octet-stream")]
-    fn deserialize_rejects_non_manifest_media_type(
-        empty_descriptor: serde_json::Value,
-        default_layers: serde_json::Value,
-        #[case] media_type: &str,
-    ) {
+    fn deserialize_rejects_non_manifest_media_type(#[case] media_type: &str) {
         let json = json!({
             "schemaVersion": 2,
             "mediaType": media_type,
-            "config": empty_descriptor,
-            "layers": default_layers
+            "config": Descriptor::empty(),
+            "layers": vec![Descriptor::empty()]
         });
 
         let err = serde_json::from_value::<Manifest>(json).unwrap_err();
@@ -186,30 +173,23 @@ mod tests {
     #[rstest]
     #[case::single(1)]
     #[case::multiple(2)]
-    fn deserialize_accepts_at_least_one_layer(
-        empty_descriptor: serde_json::Value,
-        #[case] layer_count: usize,
-    ) {
-        let layers = (0..layer_count)
-            .map(|_| empty_descriptor.clone())
-            .collect::<Vec<_>>();
-
+    fn deserialize_accepts_at_least_one_layer(#[case] count: usize) {
         let json = json!({
             "schemaVersion": 2,
-            "config": empty_descriptor,
-            "layers": layers
+            "config": Descriptor::empty(),
+            "layers": std::iter::repeat_n(Descriptor::empty(), count).collect::<Vec<_>>(),
         });
 
         let manifest = serde_json::from_value::<Manifest>(json).unwrap();
 
-        assert_eq!(manifest.layers.len(), layer_count);
+        assert_eq!(manifest.layers.len(), count);
     }
 
     #[rstest]
-    fn deserialize_rejects_missing_layers(empty_descriptor: serde_json::Value) {
+    fn deserialize_rejects_missing_layers() {
         let json = json!({
             "schemaVersion": 2,
-            "config": empty_descriptor
+            "config": Descriptor::empty(),
         });
 
         let err = serde_json::from_value::<Manifest>(json).unwrap_err();
@@ -218,10 +198,10 @@ mod tests {
     }
 
     #[rstest]
-    fn deserialize_rejects_empty_layers(empty_descriptor: serde_json::Value) {
+    fn deserialize_rejects_empty_layers() {
         let json = json!({
             "schemaVersion": 2,
-            "config": empty_descriptor,
+            "config": Descriptor::empty(),
             "layers": []
         });
 
