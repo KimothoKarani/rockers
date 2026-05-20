@@ -41,7 +41,7 @@ impl Descriptor {
         let empty_blob_digest = Digest::try_from(EMPTY_BLOB_DIGEST.to_owned()).unwrap();
 
         Self {
-            media_type: MediaType::Empty,
+            media_type: MediaType::OCI_EMPTY,
             digest: empty_blob_digest,
             size: 2,
             urls: None,
@@ -55,7 +55,7 @@ impl Descriptor {
     pub fn is_empty(&self) -> bool {
         let empty_blob_digest = Digest::try_from(EMPTY_BLOB_DIGEST.to_owned()).unwrap();
 
-        self.media_type == MediaType::Empty
+        self.media_type == MediaType::OCI_EMPTY
             && self.digest == empty_blob_digest
             && self.size == 2
             && matches!(self.data.as_deref(), None | Some("e30="))
@@ -193,7 +193,7 @@ mod tests {
     fn descriptor_empty_returns_empty_blob_descriptor() {
         let descriptor = Descriptor::empty();
 
-        assert_eq!(descriptor.media_type, MediaType::Empty);
+        assert_eq!(descriptor.media_type, MediaType::OCI_EMPTY);
         assert_eq!(descriptor.digest.to_string(), EMPTY_BLOB_DIGEST);
         assert_eq!(descriptor.size, 2);
         assert!(descriptor.urls.is_none());

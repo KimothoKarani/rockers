@@ -47,7 +47,10 @@ where
 {
     let value = MediaType::deserialize(d)?;
     // this field MUST contain `application/vnd.oci.image.manifest.v1+json` or compatible formats.
-    if !matches!(value, MediaType::ImageManifest) {
+    if !matches!(
+        &value,
+        MediaType::OCI_IMAGE_MANIFEST | MediaType::DOCKER_DISTRIBUTION_MANIFEST
+    ) {
         let msg = format!("mediaType must be {OCI_IMAGE_MANIFEST}, or compatible with it",);
         return Err(serde::de::Error::custom(msg));
     }
@@ -76,7 +79,7 @@ mod tests {
 
     use super::*;
     use crate::specs::media_type::{
-        DOCKER_DISTRIBUTION_MANIFEST, OCI_IMAGE_CONFIG, OCI_IMAGE_INDEX, OCI_IMAGE_MANIFEST,
+        DOCKER_DISTRIBUTION_MANIFEST, OCI_IMAGE_CONFIG, OCI_IMAGE_INDEX,
     };
 
     #[fixture]
@@ -95,12 +98,16 @@ mod tests {
     }
 
     #[rstest]
-    #[case::oci_image_manifest(OCI_IMAGE_MANIFEST)]
-    #[case::docker_distribution_manifest(DOCKER_DISTRIBUTION_MANIFEST)]
+    #[case::oci_image_manifest(OCI_IMAGE_MANIFEST, MediaType::OCI_IMAGE_MANIFEST)]
+    #[case::docker_distribution_manifest(
+        DOCKER_DISTRIBUTION_MANIFEST,
+        MediaType::DOCKER_DISTRIBUTION_MANIFEST
+    )]
     fn deserialize_accepts_schema_version_2_with_image_manifest_media_type(
         empty_descriptor: serde_json::Value,
         default_layers: serde_json::Value,
         #[case] media_type: &str,
+        #[case] expected: MediaType,
     ) {
         let json = json!({
             "schemaVersion": 2,
@@ -112,7 +119,7 @@ mod tests {
         let manifest = serde_json::from_value::<Manifest>(json).unwrap();
 
         assert_eq!(manifest.schema_version, 2);
-        assert_eq!(manifest.media_type, Some(MediaType::ImageManifest));
+        assert_eq!(manifest.media_type, Some(expected));
     }
 
     #[rstest]
