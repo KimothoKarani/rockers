@@ -1,12 +1,10 @@
 // https://github.com/opencontainers/image-spec/blob/main/config.md
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::specs::descriptor::Digest;
-
-// use crate::specs::descriptor::Digest;
 
 /// Defines the execution parameters for use within a container runtime.
 /// Its corresponding media type is `application/vnd.oci.image.config.v1+json`.
@@ -19,6 +17,8 @@ pub struct ImageConfiguration {
     pub author: Option<String>,
     pub architecture: String,
     pub os: String,
+    // The JSON keys "os.version" and "os.features" contain literal dots,
+    // so rename_all = "camelCase" would produce the wrong names ("osVersion").
     #[serde(
         default,
         rename = "os.version",
@@ -40,26 +40,80 @@ pub struct ImageConfiguration {
     pub history: Option<Vec<History>>,
 }
 
-/// Execution parameters which should be used as a base when running a container.
+/// A set of strings serialized as a JSON object mapping each key to an
+/// empty object, e.g. `{"8080/tcp": {}, "9090/udp": {}}`.
 ///
-/// Note: field names are PascalCase in JSON — a Docker legacy convention.
+/// This unusual shape is a direct JSON serialization of the Go type
+/// `map[string]struct{}`, which the spec inherits from Docker for
+/// `ExposedPorts` and `Volumes`. Only the keys carry meaning.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StringSet(pub HashSet<String>);
+
+/// Accepts only an empty JSON object `{}`.
+/// `deny_unknown_fields` rejects any value with content (e.g. `{"junk": 1}`)
+/// at parse time, enforcing the spec's requirement that these values are
+/// always empty.
+///
+/// Note: this must be `struct EmptyObject {}` (an empty struct), not
+/// `struct EmptyObject;` (a unit struct). Serde serializes a unit struct
+/// as `null`, but an empty struct as `{}`.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyObject {}
+
+impl Serialize for StringSet {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // Delegate to HashMap's serializer: each key maps to EmptyObject,
+        // which serializes as {}.
+        let mut map = HashMap::new();
+        for key in &self.0 {
+            map.insert(key, EmptyObject {});
+        }
+        map.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for StringSet {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Delegate to HashMap's deserializer: EmptyObject validates that
+        // every value is {}, then we keep only the keys.
+        let map = HashMap::<String, EmptyObject>::deserialize(deserializer)?;
+        let mut set = HashSet::new();
+        for key in map.keys() {
+            set.insert(key.clone());
+        }
+        Ok(StringSet(set))
+    }
+}
+
+/// Execution parameters which should be used as a base when running a
+/// container.
+///
+/// Note: field names are PascalCase in JSON (`"User"`, `"Cmd"`), a Docker
+/// legacy convention. This is the only struct in the spec that does this.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
-    /// Keys are `port/tcp`, `port/udp`, or `port`. Values are always empty objects `{}`.
+    /// Keys are `port/tcp`, `port/udp`, or `port` (default protocol: tcp).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exposed_ports: Option<HashMap<String, serde_json::Value>>,
+    pub exposed_ports: Option<StringSet>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entrypoint: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cmd: Option<Vec<String>>,
-    /// Directories likely to hold container-instance-specific data. Values are always `{}`.
+    /// Directories likely to hold container-instance-specific data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub volumes: Option<HashMap<String, serde_json::Value>>,
+    pub volumes: Option<StringSet>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -73,9 +127,14 @@ pub struct Config {
 pub struct RootFs {
     #[serde(rename = "type", deserialize_with = "deserialize_rootfs_type")]
     pub fs_type: String,
+    /// Digests of each layer's uncompressed tar archive, ordered first to
+    /// last. Not to be confused with the layer digests in the manifest,
+    /// which are computed over the compressed blobs.
     pub diff_ids: Vec<Digest>,
 }
 
+// The spec requires rootfs.type to be exactly "layers". Same validation
+// pattern as deserialize_schema_version in manifest.rs.
 fn deserialize_rootfs_type<'de, D>(d: D) -> Result<String, D::Error>
 where
     D: Deserializer<'de>,
@@ -89,7 +148,11 @@ where
     Ok(value)
 }
 
-/// Describes the history of a single layer.
+/// Describes the history of a single layer. Purely informational.
+///
+/// Entries with `empty_layer: true` correspond to build instructions that
+/// produced no filesystem change (e.g. ENV, CMD), so `history` may contain
+/// more entries than `rootfs.diff_ids`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct History {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -106,6 +169,8 @@ pub struct History {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use rstest::rstest;
     use serde_json::json;
 
@@ -141,6 +206,66 @@ mod tests {
             "type": "layers",
             "diff_ids": [DIFF_ID_A, DIFF_ID_B]
         })
+    }
+
+    // --- StringSet ---
+
+    #[test]
+    fn string_set_serializes_as_map_with_empty_object_values() {
+        let mut set = HashSet::new();
+        set.insert("8080/tcp".to_owned());
+        set.insert("9090/udp".to_owned());
+
+        let string_set = StringSet(set);
+        let serialized = serde_json::to_value(&string_set).unwrap();
+
+        assert_eq!(serialized["8080/tcp"], json!({}));
+        assert_eq!(serialized["9090/udp"], json!({}));
+    }
+
+    #[test]
+    fn string_set_deserializes_keys_from_map_with_empty_object_values() {
+        let json = json!({
+            "8080/tcp": {},
+            "9090/udp": {}
+        });
+
+        let string_set = serde_json::from_value::<StringSet>(json).unwrap();
+
+        assert!(string_set.0.contains("8080/tcp"));
+        assert!(string_set.0.contains("9090/udp"));
+        assert_eq!(string_set.0.len(), 2);
+    }
+
+    #[test]
+    fn string_set_rejects_non_empty_object_values() {
+        let json = json!({
+            "8080/tcp": {"junk": "this should not be here"}
+        });
+
+        let err = serde_json::from_value::<StringSet>(json).unwrap_err();
+
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn string_set_round_trips_correctly() {
+        let json = json!({
+            "8080/tcp": {}
+        });
+
+        let string_set = serde_json::from_value::<StringSet>(json.clone()).unwrap();
+        let serialized = serde_json::to_value(&string_set).unwrap();
+
+        assert_eq!(serialized, json);
+    }
+
+    #[test]
+    fn string_set_empty_set_serializes_as_empty_object() {
+        let string_set = StringSet(HashSet::new());
+        let serialized = serde_json::to_value(&string_set).unwrap();
+
+        assert_eq!(serialized, json!({}));
     }
 
     // --- ImageConfiguration ---
@@ -226,7 +351,6 @@ mod tests {
 
         let serialized = serde_json::to_value(&config).unwrap();
 
-        // Must be "os.version", not "osVersion"
         assert!(serialized.get("os.version").is_some());
         assert!(serialized.get("osVersion").is_none());
     }
@@ -250,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn rootfs_diff_ids_are_stored_as_strings() {
+    fn rootfs_diff_ids_parse_as_typed_digests() {
         let rootfs = serde_json::from_value::<RootFs>(valid_rootfs_json()).unwrap();
 
         assert_eq!(rootfs.diff_ids[0], Digest::try_from(DIFF_ID_A.to_string()).unwrap());
@@ -273,7 +397,6 @@ mod tests {
         assert!(serialized.get("User").is_some());
         assert!(serialized.get("WorkingDir").is_some());
         assert!(serialized.get("StopSignal").is_some());
-        // snake_case must not leak into serialized output
         assert!(serialized.get("user").is_none());
         assert!(serialized.get("working_dir").is_none());
     }
@@ -293,6 +416,45 @@ mod tests {
         assert_eq!(config.cmd.unwrap(), vec!["--flag"]);
         assert_eq!(config.env.unwrap(), vec!["FOO=bar"]);
         assert!(config.exposed_ports.is_some());
+    }
+
+    #[test]
+    fn config_deserializes_exposed_ports_and_volumes_as_sets() {
+        let json = json!({
+            "ExposedPorts": {
+                "8080/tcp": {},
+                "9090/udp": {}
+            },
+            "Volumes": {
+                "/var/log/kehai": {},
+                "/var/data": {}
+            }
+        });
+
+        let config = serde_json::from_value::<Config>(json).unwrap();
+
+        let ports = config.exposed_ports.unwrap();
+        assert!(ports.0.contains("8080/tcp"));
+        assert!(ports.0.contains("9090/udp"));
+        assert_eq!(ports.0.len(), 2);
+
+        let volumes = config.volumes.unwrap();
+        assert!(volumes.0.contains("/var/log/kehai"));
+        assert!(volumes.0.contains("/var/data"));
+        assert_eq!(volumes.0.len(), 2);
+    }
+
+    #[test]
+    fn config_rejects_exposed_ports_with_non_empty_values() {
+        let json = json!({
+            "ExposedPorts": {
+                "8080/tcp": {"should_not": "be_here"}
+            }
+        });
+
+        let err = serde_json::from_value::<Config>(json).unwrap_err();
+
+        assert!(err.to_string().contains("unknown field"));
     }
 
     // --- History ---
